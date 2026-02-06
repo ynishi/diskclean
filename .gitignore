@@ -1,0 +1,4 @@
+bin/
+nimcache/
+tests/test_diskclean
+examples/basic
