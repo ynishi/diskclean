@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.2.0"
+version       = "0.3.0"
 author        = "Yutaka Nishimura"
 description   = "Declarative disk cleanup for development projects"
 license       = "MIT"

@@ -3,7 +3,7 @@
 import std/[os, strutils, sequtils, parseopt]
 import types, rules, walker, cleaner, reporter, worktree
 
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 const Help = """
 diskclean — Declarative disk cleanup for development projects
