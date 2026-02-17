@@ -1,3 +1,5 @@
+{.push raises: [].}
+
 import std/[os, strutils, sequtils, parseopt]
 import types, rules, walker, cleaner, reporter
 
@@ -37,6 +39,17 @@ Examples:
 type
   CliError* = object of CatchableError
 
+proc die(msg: string, code = 1) =
+  ## Write error to stderr and exit. Swallows IOError on write failure.
+  try: stderr.writeLine(msg)
+  except IOError: discard
+  quit(code)
+
+proc warn(msg: string) =
+  ## Write warning to stderr. Swallows IOError on write failure.
+  try: stderr.writeLine(msg)
+  except IOError: discard
+
 proc showTypes() =
   echo "Supported project types:"
   echo ""
@@ -49,7 +62,7 @@ proc showTypes() =
       line &= "  [" & r.tool & "]"
     echo line
 
-proc rulesByName*(names: string): seq[Rule] =
+proc rulesByName*(names: string): seq[Rule] {.raises: [CliError].} =
   ## Resolve comma-separated rule names to Rule objects.
   ## Raises CliError if a name is not found.
   for name in names.split(","):
@@ -75,7 +88,11 @@ proc matchesExclude*(projectRoot: string, excludes: seq[string]): bool =
         return true
 
 proc run*() =
-  var searchRoot = getCurrentDir()
+  var searchRoot: string
+  try:
+    searchRoot = getCurrentDir()
+  except OSError:
+    die("Error: cannot determine current directory")
   var withSize = false
   var doClean = false
   var dryRun = false
@@ -108,23 +125,19 @@ proc run*() =
         try:
           selectedRules = rulesByName(p.val)
         except CliError as e:
-          stderr.writeLine(e.msg)
-          quit(1)
+          die(e.msg)
       of "exclude":
         excludes.add(p.val)
       else:
-        stderr.writeLine("Unknown option: --" & p.key)
-        stderr.writeLine("Run diskclean --help for usage")
-        quit(1)
+        die("Unknown option: --" & p.key & "\nRun diskclean --help for usage")
     of cmdArgument:
       searchRoot = p.key
 
   if not dirExists(searchRoot):
-    stderr.writeLine("Error: directory not found: " & searchRoot)
-    quit(1)
+    die("Error: directory not found: " & searchRoot)
 
   if dryRun and not doClean:
-    stderr.writeLine("Warning: --dry-run has no effect without --clean")
+    warn("Warning: --dry-run has no effect without --clean")
 
   echo "Scanning: " & searchRoot
   if withSize:

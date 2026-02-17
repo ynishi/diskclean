@@ -2,13 +2,14 @@
 ##
 ## All types are plain value objects with no heap-allocated internal state.
 
+{.push raises: [].}
+
 import std/options
 
 type
   CleanMethod* = enum
     ToolClean       ## Native tool succeeded (e.g. ``cargo clean``)
     FallbackRm      ## Direct directory removal (requires ``-d:experimentalRm``)
-    Skipped         ## Nothing to clean, or rm fallback unavailable
 
   Rule* = object
     name*: string
@@ -24,8 +25,18 @@ type
     targets*: seq[string]    ## Full paths of found target dirs
     size*: Option[int64]     ## Total size in bytes (none if not calculated)
 
+  CleanResultKind* = enum
+    crkSuccess
+    crkSkipped
+    crkError
+
   CleanResult* = object
     project*: Project
-    usedMethod*: CleanMethod
-    freed*: int64
-    error*: string           ## Empty on success
+    case kind*: CleanResultKind
+    of crkSuccess:
+      cleanMethod*: CleanMethod
+      freed*: int64
+    of crkSkipped:
+      skipReason*: string
+    of crkError:
+      error*: string

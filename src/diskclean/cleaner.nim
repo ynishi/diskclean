@@ -15,10 +15,12 @@
 ##   Enable fallback directory removal for projects without a native
 ##   clean tool. Without this flag, only tool-based cleaning is available.
 ##   Projects whose tool is unavailable or missing will be reported as
-##   ``Skipped``.
+##   ``crkSkipped``.
 ##
 ## Even with ``experimentalRm`` enabled, symlink targets are refused
 ## as an additional safety measure.
+
+{.push raises: [].}
 
 import std/[options, os, osproc, strutils]
 import types, walker
@@ -50,64 +52,72 @@ proc cleanProject*(project: Project, dryRun = false): CleanResult =
   ## Strategy:
   ##   1. Try the rule's native tool (e.g. ``cargo clean``)
   ##   2. If ``-d:experimentalRm``: fallback to ``removeDir``
-  ##   3. Otherwise: return ``Skipped``
+  ##   3. Otherwise: return ``crkSkipped``
   ##
   ## When ``dryRun`` is true, reports what *would* happen without
   ## modifying the filesystem.
-  result.project = project
 
   if project.targets.len == 0:
-    result.usedMethod = Skipped
-    return
+    return CleanResult(kind: crkSkipped, project: project,
+                       skipReason: "no targets")
 
   # 1) Try native tool
   if project.rule.tool.len > 0:
-    let bin = findExe(project.rule.toolBin)
+    var bin: string
+    try:
+      bin = findExe(project.rule.toolBin)
+    except OSError:
+      bin = ""
     if bin.len > 0:
       let sz = targetSize(project)
       if dryRun:
-        result.usedMethod = ToolClean
-        result.freed = sz
-        return
+        return CleanResult(kind: crkSuccess, project: project,
+                           cleanMethod: ToolClean, freed: sz)
       let parts = project.rule.tool.splitWhitespace()
       let args = if parts.len > 1: parts[1..^1] else: @[]
-      let process = startProcess(bin, workingDir = project.root,
-                                 args = args)
-      defer: process.close()
-      let code = waitForExit(process)
-      if code == 0:
-        result.usedMethod = ToolClean
-        result.freed = sz
-        return
+      try:
+        let process = startProcess(bin, workingDir = project.root,
+                                   args = args)
+        defer: process.close()
+        let code = waitForExit(process)
+        if code == 0:
+          return CleanResult(kind: crkSuccess, project: project,
+                             cleanMethod: ToolClean, freed: sz)
+      except CatchableError as e:
+        return CleanResult(kind: crkError, project: project,
+                           error: "failed to run " & project.rule.tool &
+                                  ": " & e.msg)
 
   # 2) Fallback: remove directories (compile-time gated)
   when defined(experimentalRm):
     if dryRun:
-      result.usedMethod = FallbackRm
-      result.freed = targetSize(project)
-      return
+      return CleanResult(kind: crkSuccess, project: project,
+                         cleanMethod: FallbackRm,
+                         freed: targetSize(project))
 
-    result.usedMethod = FallbackRm
+    var totalFreed: int64 = 0
     for dir in project.targets:
       try:
         if not dirExists(dir): continue
         if symlinkExists(dir):
-          result.error = "refusing to remove symlink: " & dir
-          return
+          return CleanResult(kind: crkError, project: project,
+                             error: "refusing to remove symlink: " & dir)
         let internalLinks = containsSymlinks(dir)
         if internalLinks.len > 0:
-          result.error = "refusing to remove: contains symlink(s): " &
-                         internalLinks[0]
-          return
+          return CleanResult(kind: crkError, project: project,
+                             error: "refusing to remove: contains symlink(s): " &
+                                    internalLinks[0])
         let sz = dirSize(dir)
         removeDir(dir)
-        result.freed += sz
+        totalFreed += sz
       except OSError as e:
-        result.error = e.msg
-        return
+        return CleanResult(kind: crkError, project: project,
+                           error: e.msg)
+    CleanResult(kind: crkSuccess, project: project,
+                cleanMethod: FallbackRm, freed: totalFreed)
   else:
-    result.usedMethod = Skipped
-    result.error = "no clean tool available (build with -d:experimentalRm to enable rm fallback)"
+    CleanResult(kind: crkSkipped, project: project,
+                skipReason: "no clean tool available (build with -d:experimentalRm to enable rm fallback)")
 
 proc cleanAll*(projects: seq[Project], dryRun = false): seq[CleanResult] =
   ## Clean all projects in sequence.

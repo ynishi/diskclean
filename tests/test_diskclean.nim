@@ -17,6 +17,27 @@ suite "types":
     check r.tool == ""
     check r.targets.len == 0
 
+  test "CleanResult object variant — success":
+    let r = CleanResult(kind: crkSuccess,
+                        project: Project(root: "/tmp"),
+                        cleanMethod: ToolClean, freed: 100)
+    check r.kind == crkSuccess
+    check r.freed == 100
+
+  test "CleanResult object variant — skipped":
+    let r = CleanResult(kind: crkSkipped,
+                        project: Project(root: "/tmp"),
+                        skipReason: "no targets")
+    check r.kind == crkSkipped
+    check r.skipReason == "no targets"
+
+  test "CleanResult object variant — error":
+    let r = CleanResult(kind: crkError,
+                        project: Project(root: "/tmp"),
+                        error: "permission denied")
+    check r.kind == crkError
+    check r.error == "permission denied"
+
 suite "rules":
   test "builtinRules has 12 entries":
     check builtinRules.len == 12
@@ -150,11 +171,10 @@ suite "walker - findMarkers":
   test "wildcard does not match bare suffix":
     let tmp = createTempDir("dc_", "_test")
     defer: removeDir(tmp)
-    writeFile(tmp / ".nimble", "")  # no basename before suffix
+    writeFile(tmp / ".nimble", "")
 
     let skip = buildSkipSet(builtinRules)
     let found = findMarkers(tmp, @["*.nimble"], skip)
-    # ".nimble" alone matches endsWith(".nimble") - document this behavior
     check found.len == 1
 
 suite "walker - scan":
@@ -269,7 +289,6 @@ suite "walker - scanAll":
     let tmp = createTempDir("dc_", "_test")
     defer: removeDir(tmp)
 
-    # Project with both Cargo.toml and pom.xml sharing "target/"
     let proj = tmp / "jni-project"
     createDir(proj)
     writeFile(proj / "Cargo.toml", "[package]")
@@ -278,7 +297,6 @@ suite "walker - scanAll":
     writeFile(proj / "target" / "out", "x")
 
     let all = scanAll(builtinRules, tmp)
-    # Should not report target/ twice
     var targetCount = 0
     for p in all:
       for t in p.targets:
@@ -292,7 +310,9 @@ suite "cleaner":
       root: "/tmp/fake",
       rule: findRule("node"),
       targets: @[])
-    check cleanProject(project).usedMethod == Skipped
+    let r = cleanProject(project)
+    check r.kind == crkSkipped
+    check r.skipReason == "no targets"
 
   test "no-tool project skipped without experimentalRm":
     when not defined(experimentalRm):
@@ -305,21 +325,20 @@ suite "cleaner":
       writeFile(proj / "node_modules" / "x.js", "y")
 
       let projects = scan(findRule("node"), tmp)
-      let result = cleanProject(projects[0])
-      check result.usedMethod == Skipped
-      check result.error.len > 0
+      let r = cleanProject(projects[0])
+      check r.kind == crkSkipped
+      check r.skipReason.len > 0
       check dirExists(proj / "node_modules")  # NOT deleted
 
-  test "cleanProject with non-zero exit does not report ToolClean":
-    # When tool binary is not found, should fall through
+  test "cleanProject with missing tool binary falls through":
     let project = Project(
       root: "/tmp/fake",
       rule: Rule(name: "test", icon: "T", markers: @["x"],
                  tool: "nonexistent_tool_12345 clean",
                  toolBin: "nonexistent_tool_12345",
                  targets: @["/tmp/fake/target"]))
-    let result = cleanProject(project)
-    check result.usedMethod != ToolClean
+    let r = cleanProject(project)
+    check r.kind != crkSuccess
 
   when defined(experimentalRm):
     test "dry run preserves directories (experimentalRm)":
@@ -332,9 +351,9 @@ suite "cleaner":
       writeFile(proj / "node_modules" / "x.js", "data")
 
       let projects = scan(findRule("node"), tmp)
-      let result = cleanProject(projects[0], dryRun = true)
-      check result.error == ""
-      check result.usedMethod == FallbackRm
+      let r = cleanProject(projects[0], dryRun = true)
+      check r.kind == crkSuccess
+      check r.cleanMethod == FallbackRm
       check dirExists(proj / "node_modules")
 
     test "clean removes target directory (experimentalRm)":
@@ -347,9 +366,9 @@ suite "cleaner":
       writeFile(proj / "node_modules" / "x.js", "data")
 
       let projects = scan(findRule("node"), tmp)
-      let result = cleanProject(projects[0])
-      check result.error == ""
-      check result.usedMethod == FallbackRm
+      let r = cleanProject(projects[0])
+      check r.kind == crkSuccess
+      check r.cleanMethod == FallbackRm
       check not dirExists(proj / "node_modules")
 
     test "refuses to remove symlink target (experimentalRm)":
@@ -364,10 +383,10 @@ suite "cleaner":
       createSymlink(real, proj / "node_modules")
 
       let projects = scan(findRule("node"), tmp)
-      let result = cleanProject(projects[0])
-      check result.usedMethod == FallbackRm
-      check "symlink" in result.error
-      check dirExists(real)  # real dir untouched
+      let r = cleanProject(projects[0])
+      check r.kind == crkError
+      check "symlink" in r.error
+      check dirExists(real)
 
     test "refuses to remove dir containing internal symlinks (experimentalRm)":
       let tmp = createTempDir("dc_", "_test")
@@ -377,17 +396,17 @@ suite "cleaner":
       writeFile(proj / "package.json", "{}")
       createDir(proj / "node_modules")
       writeFile(proj / "node_modules" / "real.js", "data")
-      # Create internal symlink
       let external = tmp / "external_lib"
       createDir(external)
       writeFile(external / "lib.js", "important")
       createSymlink(external, proj / "node_modules" / "linked_pkg")
 
       let projects = scan(findRule("node"), tmp)
-      let result = cleanProject(projects[0])
-      check "symlink" in result.error
-      check dirExists(external)  # external dir untouched
-      check dirExists(proj / "node_modules")  # NOT deleted
+      let r = cleanProject(projects[0])
+      check r.kind == crkError
+      check "symlink" in r.error
+      check dirExists(external)
+      check dirExists(proj / "node_modules")
 
     test "cleanAll processes multiple (experimentalRm)":
       let tmp = createTempDir("dc_", "_test")
@@ -403,7 +422,7 @@ suite "cleaner":
       let results = cleanAll(projects)
       check results.len == 2
       for r in results:
-        check r.error == ""
+        check r.kind == crkSuccess
 
 suite "reporter":
   test "formatSize":

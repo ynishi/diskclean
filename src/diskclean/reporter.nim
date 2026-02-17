@@ -1,3 +1,5 @@
+{.push raises: [].}
+
 import std/[options, strutils]
 import types
 
@@ -43,17 +45,18 @@ proc reportClean*(results: seq[CleanResult]) =
   var errors = 0
   var skipped = 0
   for r in results:
-    if r.error.len > 0:
+    case r.kind
+    of crkError:
       echo "✗ " & r.project.root & "  " & r.error
       inc errors
-    elif r.usedMethod == Skipped:
-      echo "- " & r.project.rule.icon & "  " & r.project.root & "  [skip]"
+    of crkSkipped:
+      echo "- " & r.project.rule.icon & "  " & r.project.root &
+           "  [skip: " & r.skipReason & "]"
       inc skipped
-    else:
-      let m = case r.usedMethod
+    of crkSuccess:
+      let m = case r.cleanMethod
         of ToolClean:  r.project.rule.tool
         of FallbackRm: "rm"
-        of Skipped:    "skip"  # unreachable but needed for exhaustive match
       var line = "✓ " & r.project.rule.icon & "  " & r.project.root
       if r.freed > 0:
         line &= "  ~" & formatSize(r.freed)

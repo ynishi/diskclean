@@ -1,3 +1,5 @@
+{.push raises: [].}
+
 import std/sequtils
 import types
 

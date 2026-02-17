@@ -1,3 +1,5 @@
+{.push raises: [].}
+
 import std/[os, options, sets, strutils]
 import types
 
@@ -11,12 +13,16 @@ proc buildSkipSet*(rules: openArray[Rule]): HashSet[string] =
 
 proc dirSize*(path: string): int64 =
   ## Calculate total size of a directory recursively.
+  ## Silently skips unreadable files (permission errors etc).
   if not dirExists(path): return 0
-  for f in walkDirRec(path):
-    try:
-      result += getFileSize(f)
-    except OSError as e:
-      stderr.writeLine("warning: cannot read size of " & f & ": " & e.msg)
+  try:
+    for f in walkDirRec(path):
+      try:
+        result += getFileSize(f)
+      except OSError:
+        discard  # unreadable file — skip silently, size is best-effort
+  except OSError:
+    discard  # walkDirRec itself failed
 
 proc findMarkers*(root: string, markers: openArray[string],
                   skip: HashSet[string]): seq[string] =
@@ -54,8 +60,8 @@ proc findMarkers*(root: string, markers: openArray[string],
               if name.endsWith(sfx):
                 result.add(path)
                 break
-    except OSError as e:
-      stderr.writeLine("warning: cannot read " & dir & ": " & e.msg)
+    except OSError:
+      discard  # unreadable directory — skip
 
 proc scan*(rule: Rule, searchRoot: string, skip: HashSet[string],
            withSize = false): seq[Project] =
@@ -92,7 +98,7 @@ proc scanAll*(rules: openArray[Rule], searchRoot: string,
   ## Deduplicates projects that share the same root and target paths
   ## (e.g. Rust and Maven both targeting "target/").
   let skip = buildSkipSet(rules)
-  var seenTargets: HashSet[string]  # tracks (root, target) pairs
+  var seenTargets: HashSet[string]
   for rule in rules:
     for project in scan(rule, searchRoot, skip, withSize):
       var uniqueTargets: seq[string]
