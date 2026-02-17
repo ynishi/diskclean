@@ -15,8 +15,8 @@ proc dirSize*(path: string): int64 =
   for f in walkDirRec(path):
     try:
       result += getFileSize(f)
-    except OSError:
-      discard
+    except OSError as e:
+      stderr.writeLine("warning: cannot read size of " & f & ": " & e.msg)
 
 proc findMarkers*(root: string, markers: openArray[string],
                   skip: HashSet[string]): seq[string] =
@@ -54,8 +54,8 @@ proc findMarkers*(root: string, markers: openArray[string],
               if name.endsWith(sfx):
                 result.add(path)
                 break
-    except OSError:
-      discard
+    except OSError as e:
+      stderr.writeLine("warning: cannot read " & dir & ": " & e.msg)
 
 proc scan*(rule: Rule, searchRoot: string, skip: HashSet[string],
            withSize = false): seq[Project] =
@@ -89,6 +89,18 @@ proc scan*(rule: Rule, searchRoot: string,
 proc scanAll*(rules: openArray[Rule], searchRoot: string,
               withSize = false): seq[Project] =
   ## Scan for all project types. Builds skip set from ALL rules.
+  ## Deduplicates projects that share the same root and target paths
+  ## (e.g. Rust and Maven both targeting "target/").
   let skip = buildSkipSet(rules)
+  var seenTargets: HashSet[string]  # tracks (root, target) pairs
   for rule in rules:
-    result.add scan(rule, searchRoot, skip, withSize)
+    for project in scan(rule, searchRoot, skip, withSize):
+      var uniqueTargets: seq[string]
+      for t in project.targets:
+        if t notin seenTargets:
+          seenTargets.incl(t)
+          uniqueTargets.add(t)
+      if uniqueTargets.len > 0:
+        var deduped = project
+        deduped.targets = uniqueTargets
+        result.add deduped

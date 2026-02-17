@@ -2,8 +2,9 @@
 ##
 ## Tool-first, rm-fallback. Minimal. Fast.
 
-import diskclean/[types, rules, walker, cleaner, reporter, cli]
-export types, rules, walker, cleaner, reporter, cli
+import diskclean/[types, rules, walker, cleaner, reporter]
+export types, rules, walker, cleaner, reporter
 
 when isMainModule:
+  import diskclean/cli
   run()

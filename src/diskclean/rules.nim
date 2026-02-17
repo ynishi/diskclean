@@ -44,7 +44,7 @@ const builtinRules* = @[
   Rule(name: "flutter", icon: "🦋",
     markers: @["pubspec.yaml"],
     tool: "flutter clean", toolBin: "flutter",
-    targets: @["build", ".dart_tool"]),
+    targets: @["build", ".dart_tool", ".dart_tools"]),
 
   # ── Functional ──
   Rule(name: "haskell", icon: "λ",

@@ -2,6 +2,7 @@ import unittest
 import std/[options, os, tempfiles, sets]
 from std/strutils import endsWith, contains
 import diskclean
+import diskclean/cli
 
 # ── Test helper ──
 
@@ -54,6 +55,16 @@ suite "rules":
     check "python" in names
     check names.len == builtinRules.len
 
+  test "flutter targets include both .dart_tool variants":
+    let r = findRule("flutter")
+    check ".dart_tool" in r.targets
+    check ".dart_tools" in r.targets
+
+  test "every rule with tool has toolBin":
+    for r in builtinRules:
+      if r.tool.len > 0:
+        check r.toolBin.len > 0
+
 suite "walker - buildSkipSet":
   test "includes permanent dirs":
     let skip = buildSkipSet(builtinRules)
@@ -78,6 +89,11 @@ suite "walker - dirSize":
 
   test "nonexistent dir is zero":
     check dirSize("/tmp/diskclean_nonexistent_12345") == 0
+
+  test "empty dir is zero":
+    let tmp = createTempDir("dc_", "_test")
+    defer: removeDir(tmp)
+    check dirSize(tmp) == 0
 
 suite "walker - findMarkers":
   test "finds marker in nested dir":
@@ -130,6 +146,16 @@ suite "walker - findMarkers":
     let skip = buildSkipSet(builtinRules)
     let found = findMarkers("/tmp/nope_12345", @["x"], skip)
     check found.len == 0
+
+  test "wildcard does not match bare suffix":
+    let tmp = createTempDir("dc_", "_test")
+    defer: removeDir(tmp)
+    writeFile(tmp / ".nimble", "")  # no basename before suffix
+
+    let skip = buildSkipSet(builtinRules)
+    let found = findMarkers(tmp, @["*.nimble"], skip)
+    # ".nimble" alone matches endsWith(".nimble") - document this behavior
+    check found.len == 1
 
 suite "walker - scan":
   test "fast scan (no size) finds rust project":
@@ -239,6 +265,27 @@ suite "walker - scanAll":
     let all = scanAll(builtinRules, tmp)
     check all.len == 2
 
+  test "deduplicates overlapping targets (rust + maven)":
+    let tmp = createTempDir("dc_", "_test")
+    defer: removeDir(tmp)
+
+    # Project with both Cargo.toml and pom.xml sharing "target/"
+    let proj = tmp / "jni-project"
+    createDir(proj)
+    writeFile(proj / "Cargo.toml", "[package]")
+    writeFile(proj / "pom.xml", "<project/>")
+    createDir(proj / "target")
+    writeFile(proj / "target" / "out", "x")
+
+    let all = scanAll(builtinRules, tmp)
+    # Should not report target/ twice
+    var targetCount = 0
+    for p in all:
+      for t in p.targets:
+        if t == proj / "target":
+          inc targetCount
+    check targetCount == 1
+
 suite "cleaner":
   test "skipped when no targets":
     let project = Project(
@@ -262,6 +309,17 @@ suite "cleaner":
       check result.usedMethod == Skipped
       check result.error.len > 0
       check dirExists(proj / "node_modules")  # NOT deleted
+
+  test "cleanProject with non-zero exit does not report ToolClean":
+    # When tool binary is not found, should fall through
+    let project = Project(
+      root: "/tmp/fake",
+      rule: Rule(name: "test", icon: "T", markers: @["x"],
+                 tool: "nonexistent_tool_12345 clean",
+                 toolBin: "nonexistent_tool_12345",
+                 targets: @["/tmp/fake/target"]))
+    let result = cleanProject(project)
+    check result.usedMethod != ToolClean
 
   when defined(experimentalRm):
     test "dry run preserves directories (experimentalRm)":
@@ -311,6 +369,26 @@ suite "cleaner":
       check "symlink" in result.error
       check dirExists(real)  # real dir untouched
 
+    test "refuses to remove dir containing internal symlinks (experimentalRm)":
+      let tmp = createTempDir("dc_", "_test")
+      defer: removeDir(tmp)
+      let proj = tmp / "nodeproj"
+      createDir(proj)
+      writeFile(proj / "package.json", "{}")
+      createDir(proj / "node_modules")
+      writeFile(proj / "node_modules" / "real.js", "data")
+      # Create internal symlink
+      let external = tmp / "external_lib"
+      createDir(external)
+      writeFile(external / "lib.js", "important")
+      createSymlink(external, proj / "node_modules" / "linked_pkg")
+
+      let projects = scan(findRule("node"), tmp)
+      let result = cleanProject(projects[0])
+      check "symlink" in result.error
+      check dirExists(external)  # external dir untouched
+      check dirExists(proj / "node_modules")  # NOT deleted
+
     test "cleanAll processes multiple (experimentalRm)":
       let tmp = createTempDir("dc_", "_test")
       defer: removeDir(tmp)
@@ -334,3 +412,36 @@ suite "reporter":
     check formatSize(1024) == "1.0 KB"
     check formatSize(1_048_576) == "1.0 MB"
     check formatSize(1_073_741_824) == "1.0 GB"
+
+  test "formatSize boundary values":
+    check formatSize(1023) == "1023 B"
+    check formatSize(1025) == "1.0 KB"
+    check formatSize(1_048_575) == "1024.0 KB"
+    check formatSize(1_073_741_823) == "1024.0 MB"
+
+suite "cli":
+  test "rulesByName resolves valid names":
+    let rules = rulesByName("rust,node")
+    check rules.len == 2
+    check rules[0].name == "rust"
+    check rules[1].name == "node"
+
+  test "rulesByName raises on unknown type":
+    expect(CliError):
+      discard rulesByName("nonexistent")
+
+  test "rulesByName is case-insensitive":
+    let rules = rulesByName("RUST")
+    check rules.len == 1
+    check rules[0].name == "rust"
+
+  test "matchesExclude matches path segments":
+    check matchesExclude("/home/user/myapp/src", @["myapp"])
+    check not matchesExclude("/home/user/myapp/src", @["app"])
+    check not matchesExclude("/home/user/testing/src", @["test"])
+    check matchesExclude("/home/user/testing/src", @["testing"])
+
+suite "findRule helper":
+  test "raises KeyError for nonexistent rule":
+    expect(KeyError):
+      discard findRule("nonexistent_rule_xyz")

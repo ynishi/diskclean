@@ -23,6 +23,21 @@
 import std/[options, os, osproc, strutils]
 import types, walker
 
+when defined(experimentalRm):
+  proc containsSymlinks(dir: string): seq[string] =
+    ## Walk a directory tree and return paths of any symlinks found inside.
+    var stack = @[dir]
+    while stack.len > 0:
+      let current = stack.pop()
+      try:
+        for kind, path in walkDir(current):
+          if kind in {pcLinkToDir, pcLinkToFile}:
+            result.add(path)
+          elif kind == pcDir:
+            stack.add(path)
+      except OSError:
+        discard
+
 proc targetSize(project: Project): int64 =
   ## Calculate total size of target dirs. Uses cached size if available.
   if project.size.isSome: return project.size.get
@@ -54,12 +69,12 @@ proc cleanProject*(project: Project, dryRun = false): CleanResult =
         result.usedMethod = ToolClean
         result.freed = sz
         return
-      let parts = project.rule.tool.split(" ")
+      let parts = project.rule.tool.splitWhitespace()
       let args = if parts.len > 1: parts[1..^1] else: @[]
       let process = startProcess(bin, workingDir = project.root,
                                  args = args)
+      defer: process.close()
       let code = waitForExit(process)
-      process.close()
       if code == 0:
         result.usedMethod = ToolClean
         result.freed = sz
@@ -78,6 +93,11 @@ proc cleanProject*(project: Project, dryRun = false): CleanResult =
         if not dirExists(dir): continue
         if symlinkExists(dir):
           result.error = "refusing to remove symlink: " & dir
+          return
+        let internalLinks = containsSymlinks(dir)
+        if internalLinks.len > 0:
+          result.error = "refusing to remove: contains symlink(s): " &
+                         internalLinks[0]
           return
         let sz = dirSize(dir)
         removeDir(dir)

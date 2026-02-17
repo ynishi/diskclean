@@ -20,7 +20,7 @@ Options:
   --clean             Actually delete (default: scan only)
   --dry-run           Show what would be cleaned (with --clean)
   --only=TYPE[,TYPE]  Filter by type (comma-separated)
-  --exclude=PATH      Exclude project path (substring match, repeatable)
+  --exclude=PATH      Exclude project path (path segment match, repeatable)
 
 Examples:
   diskclean                            Scan current directory (fast)
@@ -34,6 +34,9 @@ Examples:
   diskclean --exclude=myapp --clean    Clean all except myapp
 """
 
+type
+  CliError* = object of CatchableError
+
 proc showTypes() =
   echo "Supported project types:"
   echo ""
@@ -46,7 +49,9 @@ proc showTypes() =
       line &= "  [" & r.tool & "]"
     echo line
 
-proc rulesByName(names: string): seq[Rule] =
+proc rulesByName*(names: string): seq[Rule] =
+  ## Resolve comma-separated rule names to Rule objects.
+  ## Raises CliError if a name is not found.
   for name in names.split(","):
     let lower = name.strip.toLowerAscii
     var found = false
@@ -56,9 +61,18 @@ proc rulesByName(names: string): seq[Rule] =
         found = true
         break
     if not found:
-      echo "Unknown type: " & name.strip
-      echo "Available: " & ruleNames().join(", ")
-      quit(1)
+      raise newException(CliError,
+        "Unknown type: " & name.strip & ". Available: " &
+        ruleNames().join(", "))
+
+proc matchesExclude*(projectRoot: string, excludes: seq[string]): bool =
+  ## Check if projectRoot matches any exclude pattern.
+  ## Matches against path segments (directory names), not substrings.
+  let segments = projectRoot.split(DirSep)
+  for ex in excludes:
+    for seg in segments:
+      if seg == ex:
+        return true
 
 proc run*() =
   var searchRoot = getCurrentDir()
@@ -91,15 +105,26 @@ proc run*() =
       of "dry-run":
         dryRun = true
       of "only":
-        selectedRules = rulesByName(p.val)
+        try:
+          selectedRules = rulesByName(p.val)
+        except CliError as e:
+          stderr.writeLine(e.msg)
+          quit(1)
       of "exclude":
         excludes.add(p.val)
       else:
-        echo "Unknown option: --" & p.key
-        echo "Run diskclean --help for usage"
+        stderr.writeLine("Unknown option: --" & p.key)
+        stderr.writeLine("Run diskclean --help for usage")
         quit(1)
     of cmdArgument:
       searchRoot = p.key
+
+  if not dirExists(searchRoot):
+    stderr.writeLine("Error: directory not found: " & searchRoot)
+    quit(1)
+
+  if dryRun and not doClean:
+    stderr.writeLine("Warning: --dry-run has no effect without --clean")
 
   echo "Scanning: " & searchRoot
   if withSize:
@@ -109,15 +134,7 @@ proc run*() =
   var projects = scanAll(selectedRules, searchRoot, withSize)
 
   if excludes.len > 0:
-    projects = projects.filterIt(
-      block:
-        var dominated = false
-        for ex in excludes:
-          if ex in it.root:
-            dominated = true
-            break
-        not dominated
-    )
+    projects = projects.filterIt(not matchesExclude(it.root, excludes))
 
   reportScan(projects)
 
