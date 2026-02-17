@@ -10,6 +10,7 @@ type
   CleanMethod* = enum
     ToolClean       ## Native tool succeeded (e.g. ``cargo clean``)
     FallbackRm      ## Direct directory removal (requires ``-d:experimentalRm``)
+    WorktreeRemove  ## ``git worktree remove`` succeeded
 
   Rule* = object
     name*: string
@@ -25,6 +26,12 @@ type
     targets*: seq[string]    ## Full paths of found target dirs
     size*: Option[int64]     ## Total size in bytes (none if not calculated)
 
+  WorktreeInfo* = object
+    path*: string            ## Worktree directory path
+    branch*: string          ## Branch name (short, e.g. "feature/xxx")
+    mainRepo*: string        ## Path to the main repository
+    size*: Option[int64]     ## Total size in bytes (none if not calculated)
+
   CleanResultKind* = enum
     crkSuccess
     crkSkipped
@@ -32,6 +39,7 @@ type
 
   CleanResult* = object
     project*: Project
+    worktree*: Option[WorktreeInfo]  ## Set when cleaning a worktree
     case kind*: CleanResultKind
     of crkSuccess:
       cleanMethod*: CleanMethod

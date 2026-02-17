@@ -4,8 +4,8 @@
 
 {.push raises: [].}
 
-import diskclean/[types, rules, walker, cleaner, reporter]
-export types, rules, walker, cleaner, reporter
+import diskclean/[types, rules, walker, cleaner, reporter, worktree]
+export types, rules, walker, cleaner, reporter, worktree
 
 when isMainModule:
   import diskclean/cli

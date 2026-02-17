@@ -3,7 +3,7 @@
 import std/[os, options, sets, strutils]
 import types
 
-const permanentSkip = [".git", ".hg", ".svn", ".cache"]
+const permanentSkip* = [".git", ".hg", ".svn", ".cache"]
 
 proc buildSkipSet*(rules: openArray[Rule]): HashSet[string] =
   ## Build skip set from all rules' targets + VCS/cache dirs.

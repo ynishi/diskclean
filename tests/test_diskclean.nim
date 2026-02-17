@@ -1,15 +1,55 @@
 import unittest
-import std/[options, os, tempfiles, sets]
+import std/[options, os, osproc, tempfiles, sets]
 from std/strutils import endsWith, contains
 import diskclean
 import diskclean/cli
 
-# ── Test helper ──
+# ── Test helpers ──
 
 proc findRule(name: string): Rule =
   for r in builtinRules:
     if r.name == name: return r
   raise newException(KeyError, "rule not found: " & name)
+
+# macOS: /tmp -> /private/tmp, git returns canonical paths
+proc canonical(path: string): string =
+  try: expandSymlink(path)
+  except CatchableError: path
+
+proc git(args: string): int =
+  ## Run a git command and return exit code.
+  let (output, code) = execCmdEx("git " & args)
+  if code != 0:
+    echo "git command failed: git " & args
+    echo output
+  result = code
+
+proc initTestRepo(parentDir: string): string =
+  ## Create a git repo at parentDir/repo with one commit on main.
+  result = parentDir / "repo"
+  createDir(result)
+  doAssert git("-C " & result & " init -b main") == 0
+  doAssert git("-C " & result & " config user.email test@test.com") == 0
+  doAssert git("-C " & result & " config user.name test") == 0
+  writeFile(result / "README.md", "hello")
+  doAssert git("-C " & result & " add .") == 0
+  doAssert git("-C " & result & " commit -m 'init'") == 0
+
+proc cleanupWorktree(repo, wtPath: string) =
+  discard execCmdEx("git -C " & repo & " worktree remove --force " & wtPath & " 2>/dev/null")
+
+proc setupMergedWorktree(tmp, repo: string,
+                         branchName = "feature/clean",
+                         wtDirName = "repo-feat"): string =
+  ## Create a merged worktree and return its path.
+  result = tmp / wtDirName
+  doAssert git("-C " & repo & " checkout -b " & branchName) == 0
+  writeFile(repo / "feat.txt", "done")
+  doAssert git("-C " & repo & " add .") == 0
+  doAssert git("-C " & repo & " commit -m 'feature'") == 0
+  doAssert git("-C " & repo & " checkout main") == 0
+  doAssert git("-C " & repo & " merge " & branchName) == 0
+  doAssert git("-C " & repo & " worktree add " & result & " " & branchName) == 0
 
 suite "types":
   test "Rule zero-value is safe":
@@ -423,6 +463,208 @@ suite "cleaner":
       check results.len == 2
       for r in results:
         check r.kind == crkSuccess
+
+suite "worktree - parseWorktreeList":
+  test "parses single worktree entry":
+    let output = "worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main\n\n"
+    let result = parseWorktreeList(output)
+    check result.len == 1
+    check result[0].path == "/home/user/repo"
+    check result[0].branch == "main"
+    check result[0].isBare == false
+
+  test "parses multiple worktree entries":
+    let output = """worktree /home/user/repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/repo-feature
+HEAD def456
+branch refs/heads/feature/login
+
+"""
+    let result = parseWorktreeList(output)
+    check result.len == 2
+    check result[0].path == "/home/user/repo"
+    check result[0].branch == "main"
+    check result[1].path == "/home/user/repo-feature"
+    check result[1].branch == "feature/login"
+
+  test "detects bare worktree":
+    let output = "worktree /home/user/repo\nHEAD abc123\nbare\n\n"
+    let result = parseWorktreeList(output)
+    check result.len == 1
+    check result[0].isBare == true
+
+  test "handles detached HEAD (no branch line)":
+    let output = "worktree /home/user/repo-detached\nHEAD abc123\ndetached\n\n"
+    let result = parseWorktreeList(output)
+    check result.len == 1
+    check result[0].branch == ""
+
+  test "parses output without trailing newline":
+    let output = "worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main"
+    let result = parseWorktreeList(output)
+    check result.len == 1
+    check result[0].branch == "main"
+
+  test "empty output returns empty":
+    check parseWorktreeList("").len == 0
+
+  test "branch name with trailing + is preserved":
+    let output = "worktree /tmp/repo\nHEAD abc\nbranch refs/heads/feature/c++\n\n"
+    let result = parseWorktreeList(output)
+    check result.len == 1
+    check result[0].branch == "feature/c++"
+
+suite "worktree - findGitRepos":
+  test "finds git repo in directory":
+    let tmp = createTempDir("dc_", "_wt")
+    defer: removeDir(tmp)
+    let repo = tmp / "myrepo"
+    createDir(repo / ".git")
+
+    let repos = findGitRepos(tmp)
+    check repos.len == 1
+    check repos[0] == repo
+
+  test "finds nested git repos":
+    let tmp = createTempDir("dc_", "_wt")
+    defer: removeDir(tmp)
+    createDir(tmp / "a" / ".git")
+    createDir(tmp / "b" / "sub" / ".git")
+
+    let repos = findGitRepos(tmp)
+    check repos.len == 2
+
+  test "skips common artifact directories":
+    let tmp = createTempDir("dc_", "_wt")
+    defer: removeDir(tmp)
+    createDir(tmp / "node_modules" / "fake" / ".git")
+    createDir(tmp / "real" / ".git")
+
+    let repos = findGitRepos(tmp)
+    check repos.len == 1
+    check repos[0] == tmp / "real"
+
+  test "nonexistent root returns empty":
+    check findGitRepos("/tmp/nonexistent_wt_12345").len == 0
+
+suite "worktree - scanWorktrees integration":
+  test "finds merged worktree in real git repo":
+    let tmp = canonical(createTempDir("dc_", "_wt_integ"))
+    let repo = initTestRepo(tmp)
+    let wtPath = tmp / "repo-feat"
+    defer:
+      cleanupWorktree(repo, wtPath)
+      removeDir(tmp)
+
+    check git("-C " & repo & " checkout -b feature/done") == 0
+    writeFile(repo / "feature.txt", "done")
+    check git("-C " & repo & " add .") == 0
+    check git("-C " & repo & " commit -m 'feature'") == 0
+    check git("-C " & repo & " checkout main") == 0
+    check git("-C " & repo & " merge feature/done") == 0
+    check git("-C " & repo & " worktree add " & wtPath & " feature/done") == 0
+
+    let results = scanWorktrees(tmp)
+    check results.len == 1
+    check results[0].branch == "feature/done"
+    check results[0].mainRepo == repo
+
+  test "does not include unmerged worktree":
+    let tmp = canonical(createTempDir("dc_", "_wt_integ2"))
+    let repo = initTestRepo(tmp)
+    let wtPath = tmp / "repo-wip"
+    defer:
+      cleanupWorktree(repo, wtPath)
+      removeDir(tmp)
+
+    check git("-C " & repo & " branch feature/wip") == 0
+    check git("-C " & repo & " worktree add " & wtPath & " feature/wip") == 0
+    writeFile(wtPath / "wip.txt", "work in progress")
+    check git("-C " & wtPath & " add .") == 0
+    check git("-C " & wtPath & " commit -m 'wip'") == 0
+
+    check scanWorktrees(tmp).len == 0
+
+  test "excludes dirty worktree (uncommitted changes)":
+    let tmp = canonical(createTempDir("dc_", "_wt_integ4"))
+    let repo = initTestRepo(tmp)
+    let wtPath = tmp / "repo-dirty"
+    defer:
+      cleanupWorktree(repo, wtPath)
+      removeDir(tmp)
+
+    check git("-C " & repo & " checkout -b feature/dirty") == 0
+    writeFile(repo / "feature.txt", "done")
+    check git("-C " & repo & " add .") == 0
+    check git("-C " & repo & " commit -m 'feature'") == 0
+    check git("-C " & repo & " checkout main") == 0
+    check git("-C " & repo & " merge feature/dirty") == 0
+    check git("-C " & repo & " worktree add " & wtPath & " feature/dirty") == 0
+    writeFile(wtPath / "uncommitted.txt", "not committed")
+
+    check scanWorktrees(tmp).len == 0
+
+  test "no worktrees returns empty":
+    let tmp = canonical(createTempDir("dc_", "_wt_integ3"))
+    discard initTestRepo(tmp)
+    defer: removeDir(tmp)
+
+    check scanWorktrees(tmp).len == 0
+
+suite "worktree - cleanWorktrees":
+  test "dry-run reports size without removing":
+    let tmp = canonical(createTempDir("dc_", "_wt_clean1"))
+    let repo = initTestRepo(tmp)
+    let wtPath = setupMergedWorktree(tmp, repo)
+    defer:
+      discard execCmdEx("git -C " & repo & " worktree remove --force " & wtPath & " 2>/dev/null")
+      removeDir(tmp)
+
+    let worktrees = scanWorktrees(tmp)
+    check worktrees.len == 1
+
+    let results = cleanWorktrees(worktrees, dryRun = true)
+    check results.len == 1
+    check results[0].kind == crkSuccess
+    check results[0].cleanMethod == WorktreeRemove
+    check results[0].freed > 0
+    # Directory still exists after dry-run
+    check dirExists(wtPath)
+
+  test "actual removal deletes worktree":
+    let tmp = canonical(createTempDir("dc_", "_wt_clean2"))
+    let repo = initTestRepo(tmp)
+    let wtPath = setupMergedWorktree(tmp, repo)
+    defer: removeDir(tmp)
+
+    let worktrees = scanWorktrees(tmp)
+    check worktrees.len == 1
+
+    let results = cleanWorktrees(worktrees)
+    check results.len == 1
+    check results[0].kind == crkSuccess
+    check results[0].cleanMethod == WorktreeRemove
+    check results[0].freed > 0
+    # Directory removed
+    check not dirExists(wtPath)
+
+  test "nonexistent worktree path returns skipped":
+    let wt = WorktreeInfo(
+      path: "/tmp/nonexistent_wt_99999",
+      branch: "feature/gone",
+      mainRepo: "/tmp/nonexistent_repo_99999")
+
+    let results = cleanWorktrees(@[wt])
+    check results.len == 1
+    check results[0].kind == crkSkipped
+    check "does not exist" in results[0].skipReason
+
+  test "empty list returns empty":
+    let results = cleanWorktrees(@[])
+    check results.len == 0
 
 suite "reporter":
   test "formatSize":

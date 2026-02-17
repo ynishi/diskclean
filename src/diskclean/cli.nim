@@ -1,7 +1,7 @@
 {.push raises: [].}
 
 import std/[os, strutils, sequtils, parseopt]
-import types, rules, walker, cleaner, reporter
+import types, rules, walker, cleaner, reporter, worktree
 
 const Version = "0.2.0"
 
@@ -23,6 +23,7 @@ Options:
   --dry-run           Show what would be cleaned (with --clean)
   --only=TYPE[,TYPE]  Filter by type (comma-separated)
   --exclude=PATH      Exclude project path (path segment match, repeatable)
+  --worktree          Include merged git worktrees as cleanup targets
 
 Examples:
   diskclean                            Scan current directory (fast)
@@ -34,6 +35,8 @@ Examples:
   diskclean --clean                    Clean all found projects
   diskclean --clean --only=node        Clean node_modules only
   diskclean --exclude=myapp --clean    Clean all except myapp
+  diskclean --worktree                 Show merged worktrees
+  diskclean --worktree --clean         Remove merged worktrees
 """
 
 type
@@ -96,6 +99,7 @@ proc run*() =
   var withSize = false
   var doClean = false
   var dryRun = false
+  var scanWorktree = false
   var selectedRules = builtinRules
   var excludes: seq[string]
 
@@ -128,6 +132,8 @@ proc run*() =
           die(e.msg)
       of "exclude":
         excludes.add(p.val)
+      of "worktree":
+        scanWorktree = true
       else:
         die("Unknown option: --" & p.key & "\nRun diskclean --help for usage")
     of cmdArgument:
@@ -145,19 +151,40 @@ proc run*() =
   echo ""
 
   var projects = scanAll(selectedRules, searchRoot, withSize)
-
   if excludes.len > 0:
     projects = projects.filterIt(not matchesExclude(it.root, excludes))
-
   reportScan(projects)
 
-  if doClean and projects.len > 0:
+  # Worktree scan
+  var mergedWorktrees: seq[WorktreeInfo]
+  if scanWorktree:
     echo ""
-    if dryRun:
-      echo "--- Dry Run ---"
-      let results = cleanAll(projects, dryRun = true)
-      reportClean(results)
-    else:
-      echo "--- Cleaning ---"
-      let results = cleanAll(projects)
-      reportClean(results)
+    mergedWorktrees = scanWorktrees(searchRoot, withSize)
+    if excludes.len > 0:
+      mergedWorktrees = mergedWorktrees.filterIt(
+        not matchesExclude(it.path, excludes))
+    reportWorktreeScan(mergedWorktrees)
+
+  if doClean:
+    var allResults: seq[CleanResult]
+
+    if projects.len > 0:
+      echo ""
+      if dryRun:
+        echo "--- Dry Run (projects) ---"
+        allResults.add cleanAll(projects, dryRun = true)
+      else:
+        echo "--- Cleaning (projects) ---"
+        allResults.add cleanAll(projects)
+
+    if scanWorktree and mergedWorktrees.len > 0:
+      echo ""
+      if dryRun:
+        echo "--- Dry Run (worktrees) ---"
+        allResults.add cleanWorktrees(mergedWorktrees, dryRun = true)
+      else:
+        echo "--- Cleaning (worktrees) ---"
+        allResults.add cleanWorktrees(mergedWorktrees)
+
+    if allResults.len > 0:
+      reportClean(allResults)

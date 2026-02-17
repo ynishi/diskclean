@@ -23,7 +23,7 @@
 {.push raises: [].}
 
 import std/[options, os, osproc, strutils]
-import types, walker
+import types, walker, worktree
 
 when defined(experimentalRm):
   proc containsSymlinks(dir: string): seq[string] =
@@ -119,7 +119,49 @@ proc cleanProject*(project: Project, dryRun = false): CleanResult =
     CleanResult(kind: crkSkipped, project: project,
                 skipReason: "no clean tool available (build with -d:experimentalRm to enable rm fallback)")
 
+proc cleanWorktree(wt: WorktreeInfo,
+                   dryRun = false): CleanResult =
+  ## Remove a merged worktree using ``git worktree remove``.
+  ## Runs from the main repository directory.
+  if not dirExists(wt.path):
+    return CleanResult(kind: crkSkipped, project: Project(),
+                       worktree: some(wt),
+                       skipReason: "worktree path does not exist: " & wt.path)
+
+  let sz = if wt.size.isSome: wt.size.get
+           else: dirSize(wt.path)
+
+  if dryRun:
+    return CleanResult(kind: crkSuccess, project: Project(),
+                       worktree: some(wt),
+                       cleanMethod: WorktreeRemove, freed: sz)
+
+  let (output, code) = gitExec(["-C", wt.mainRepo, "worktree", "remove", wt.path])
+
+  if code == 0:
+    CleanResult(kind: crkSuccess, project: Project(),
+                worktree: some(wt),
+                cleanMethod: WorktreeRemove, freed: sz)
+  else:
+    let detail = output.strip
+    let msg = if detail.len > 0: "git worktree remove: " & detail
+              else: "git worktree remove failed (exit " & $code & ")"
+    CleanResult(kind: crkError, project: Project(),
+                worktree: some(wt), error: msg)
+
 proc cleanAll*(projects: seq[Project], dryRun = false): seq[CleanResult] =
   ## Clean all projects in sequence.
   for p in projects:
     result.add cleanProject(p, dryRun)
+
+proc cleanWorktrees*(worktrees: seq[WorktreeInfo],
+                     dryRun = false): seq[CleanResult] =
+  ## Clean all merged worktrees in sequence.
+  if resolveGitBin().len == 0:
+    for wt in worktrees:
+      result.add CleanResult(kind: crkError, project: Project(),
+                             worktree: some(wt),
+                             error: "git not found")
+    return
+  for wt in worktrees:
+    result.add cleanWorktree(wt, dryRun)

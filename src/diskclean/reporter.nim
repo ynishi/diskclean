@@ -1,7 +1,7 @@
 {.push raises: [].}
 
 import std/[options, strutils]
-import types
+import types, worktree
 
 const
   GiB = 1_073_741_824'i64
@@ -40,24 +40,60 @@ proc reportScan*(projects: seq[Project]) =
   else:
     echo $projects.len & " projects found"
 
+proc reportWorktreeScan*(worktrees: seq[WorktreeInfo]) =
+  if worktrees.len == 0:
+    echo "No merged worktrees found."
+    return
+  var total: int64 = 0
+  var hasSize = false
+  for wt in worktrees:
+    var line = worktreeRule.icon & "  " & wt.path & "  [" & wt.branch & "]"
+    if wt.size.isSome:
+      hasSize = true
+      let sz = wt.size.get
+      line &= "  " & formatSize(sz)
+      total += sz
+    echo line
+  echo ""
+  if hasSize:
+    echo "Merged worktrees: " & formatSize(total) &
+         " across " & $worktrees.len & " worktrees"
+  else:
+    echo $worktrees.len & " merged worktrees found"
+
 proc reportClean*(results: seq[CleanResult]) =
   var freed: int64 = 0
   var errors = 0
   var skipped = 0
   for r in results:
+    let isWorktree = r.worktree.isSome
     case r.kind
     of crkError:
-      echo "✗ " & r.project.root & "  " & r.error
+      let label = if isWorktree: r.worktree.get.path
+                  else: r.project.root
+      echo "✗ " & label & "  " & r.error
       inc errors
     of crkSkipped:
-      echo "- " & r.project.rule.icon & "  " & r.project.root &
+      let (icon, label) =
+        if isWorktree:
+          (worktreeRule.icon, r.worktree.get.path)
+        else:
+          (r.project.rule.icon, r.project.root)
+      echo "- " & icon & "  " & label &
            "  [skip: " & r.skipReason & "]"
       inc skipped
     of crkSuccess:
       let m = case r.cleanMethod
-        of ToolClean:  r.project.rule.tool
-        of FallbackRm: "rm"
-      var line = "✓ " & r.project.rule.icon & "  " & r.project.root
+        of ToolClean:      r.project.rule.tool
+        of FallbackRm:     "rm"
+        of WorktreeRemove: "git worktree remove"
+      let (icon, label) =
+        if isWorktree:
+          (worktreeRule.icon,
+           r.worktree.get.path & "  [" & r.worktree.get.branch & "]")
+        else:
+          (r.project.rule.icon, r.project.root)
+      var line = "✓ " & icon & "  " & label
       if r.freed > 0:
         line &= "  ~" & formatSize(r.freed)
       line &= "  [" & m & "]"
