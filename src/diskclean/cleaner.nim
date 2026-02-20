@@ -65,7 +65,7 @@ proc cleanProject*(project: Project, dryRun = false): CleanResult =
   if project.rule.tool.len > 0:
     var bin: string
     try:
-      bin = findExe(project.rule.toolBin)
+      bin = findExe(project.rule.toolBin, followSymlinks = false)
     except OSError:
       bin = ""
     if bin.len > 0:
@@ -83,6 +83,10 @@ proc cleanProject*(project: Project, dryRun = false): CleanResult =
         if code == 0:
           return CleanResult(kind: crkSuccess, project: project,
                              cleanMethod: ToolClean, freed: sz)
+        else:
+          return CleanResult(kind: crkError, project: project,
+                             error: project.rule.tool &
+                                    " failed (exit " & $code & ")")
       except CatchableError as e:
         return CleanResult(kind: crkError, project: project,
                            error: "failed to run " & project.rule.tool &
